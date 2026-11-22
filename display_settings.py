@@ -24,7 +24,7 @@ class DisplaySettingsWindow:
         self.hotkey = ttk.Entry(main, width=45)
         self.hotkey.insert(0, preferences.hotkey)
         self.hotkey.pack(fill="x", pady=(5, 2))
-        ttk.Label(main, text="Např. Ctrl+Alt+F9. Prázdné pole zkratku vypne.").pack(anchor="w")
+        ttk.Label(main, text="Např. Ctrl+Alt+F9 nebo §+). Prázdné pole zkratku vypne.").pack(anchor="w")
 
         ttk.Label(main, text="Lokalita počasí", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(16, 5))
         search_row = ttk.Frame(main)

@@ -18,11 +18,19 @@ Zavřením okna přes **×** se aplikace skryje k hodinám. Kliknutím na její 
 
 Obrazovky se přepínají výběrem v okně, volbou **Další obrazovka** u hodin nebo výchozí zkratkou **Ctrl+Alt+F9**. Zkratku lze změnit v **Nastavení** a funguje i se skrytým oknem.
 
+Můžeš použít i dvě běžné klávesy současně, například `§+)` na českém rozložení. Přidrž jednu, stiskni druhou a uvolni je. Znaky se určují podle aktuálního rozložení klávesnice.
+
 Na LED panelu a v jeho náhledu se text kreslí ostrými pixely bez diakritiky. V okně aplikace se zobrazují původní názvy a titulky.
 
 Soubor `.exe` lze použít samostatně na 64bitových Windows 10 nebo 11 s Bluetooth LE. Pro jeden panel používej jedno ovládání.
 
 Pokud Windows při spuštění hlásí chybějící `VCRUNTIME140.dll` nebo `VCRUNTIME140_1.dll`, nainstaluj [Microsoft Visual C++ Redistributable pro x64](https://aka.ms/vc14/vc_redist.x64.exe).
+
+### Aktualizace
+
+Od verze 1.2.1 kontroluje samostatné `.exe` při spuštění a poté jednou denně nové stabilní vydání na GitHubu. Kontrolu můžeš spustit i tlačítkem **Zkontrolovat aktualizace**. Když se objeví novější vydání, klikni na **Nainstalovat a restartovat**. Aplikace ověří SHA-256 staženého souboru podle údajů z GitHubu a nahradí své `.exe`. Zapamatovaný panel, lokalita a zkratka zůstanou uložené. Předchozí `.exe` se uloží vedle aplikace s příponou `.previous`.
+
+První přechod z verze 1.2.0 nebo starší udělej ručním stažením [nového EXE](https://github.com/Takashiri/led-panel-pc/releases/latest/download/LED-Panel.exe). Před výměnou zavři aplikaci přes **Ukončit** v nabídce u hodin.
 
 ## Spuštění z příkazové řádky
 

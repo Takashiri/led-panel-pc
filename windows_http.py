@@ -48,7 +48,7 @@ def open_handle(stack, handle):
     return handle
 
 
-def get(url, user_agent):
+def get(url, user_agent, *, max_body=MAX_BODY):
     address = urlsplit(url)
     if address.scheme != "https" or not address.hostname or address.username or address.password:
         raise ValueError("Zdroj musí používat HTTPS.")
@@ -75,5 +75,5 @@ def get(url, user_agent):
             if not size.value:
                 return bytes(body)
             body.extend(chunk.raw[:size.value])
-            if len(body) > MAX_BODY:
+            if len(body) > max_body:
                 raise ValueError("Odpověď zdroje je příliš velká.")

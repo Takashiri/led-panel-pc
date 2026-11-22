@@ -10,7 +10,11 @@ OPEN_MESSAGE = 0x8002
 WM_CONTEXTMENU = 0x007B
 WM_HOTKEY = 0x0312
 MODIFIERS = {"Ctrl": 0x0002, "Alt": 0x0001, "Shift": 0x0004}
+MODIFIER_KEYS = {0x11: MODIFIERS["Ctrl"], 0x12: MODIFIERS["Alt"], 0x10: MODIFIERS["Shift"],
+                 0x5B: 0x0008, 0x5C: 0x0008}
+CHARACTER_MODIFIERS = {1: MODIFIERS["Shift"], 2: MODIFIERS["Ctrl"], 4: MODIFIERS["Alt"]}
 MOD_NOREPEAT = 0x4000
+CHORD_POLL_MS = 20
 HOTKEY_KEYS = {chr(code): code for code in (*range(48, 58), *range(65, 91))}
 HOTKEY_KEYS.update({f"F{number}": 0x6F + number for number in range(1, 25) if number != 12})
 WM_LBUTTONUP = 0x0202
@@ -60,13 +64,22 @@ def api(dll, name, result, *arguments):
 
 def parse_hotkey(text):
     if not text.strip():
-        return "", 0, 0
-    *parts, key = (part.strip().title() for part in text.split("+"))
-    key = key.upper()
-    if not parts or len(parts) != len(set(parts)) or set(parts) - MODIFIERS.keys() or key not in HOTKEY_KEYS:
-        raise ValueError("Použij např. Ctrl+Alt+F9. Klávesa může být A–Z, 0–9 nebo F1–F24 kromě F12.")
-    canonical = "+".join([*(name for name in MODIFIERS if name in parts), key])
-    return canonical, sum(MODIFIERS[name] for name in parts), HOTKEY_KEYS[key]
+        return "", 0, ()
+    modifiers = []
+    keys = []
+    for part in (part.strip() for part in text.split("+")):
+        if part.title() in MODIFIERS:
+            modifiers.append(part.title())
+        else:
+            keys.append(part.upper() if part.upper() in HOTKEY_KEYS else part)
+    valid_single = len(keys) == 1 and modifiers and keys[0] in HOTKEY_KEYS
+    valid_pair = len(keys) == 2 and keys[0] != keys[1] and all(
+        key in HOTKEY_KEYS or (len(key) == 1 and key.isprintable() and ord(key) <= 0xFFFF) for key in keys
+    )
+    if len(modifiers) != len(set(modifiers)) or not (valid_single or valid_pair):
+        raise ValueError("Použij např. Ctrl+Alt+F9 nebo dvě různé klávesy jako §+).")
+    canonical = "+".join([*(name for name in MODIFIERS if name in modifiers), *keys])
+    return canonical, sum(MODIFIERS[name] for name in modifiers), tuple(keys)
 
 
 user = ct.WinDLL("user32", use_last_error=True)
@@ -82,6 +95,11 @@ post_message = api(user, "PostMessageW", win.BOOL, win.HWND, win.UINT, win.WPARA
 register_message = api(user, "RegisterWindowMessageW", win.UINT, win.LPCWSTR)
 register_hotkey = api(user, "RegisterHotKey", win.BOOL, win.HWND, ct.c_int, win.UINT, win.UINT)
 unregister_hotkey = api(user, "UnregisterHotKey", win.BOOL, win.HWND, ct.c_int)
+get_foreground_window = api(user, "GetForegroundWindow", win.HWND)
+get_window_thread = api(user, "GetWindowThreadProcessId", win.DWORD, win.HWND, ct.POINTER(win.DWORD))
+get_keyboard_layout = api(user, "GetKeyboardLayout", win.HANDLE, win.DWORD)
+key_for_character = api(user, "VkKeyScanExW", ct.c_short, win.WCHAR, win.HANDLE)
+async_key_state = api(user, "GetAsyncKeyState", ct.c_short, ct.c_int)
 load_image = api(user, "LoadImageW", win.HANDLE, win.HINSTANCE, win.LPCWSTR,
                  win.UINT, ct.c_int, ct.c_int, win.UINT)
 destroy_icon = api(user, "DestroyIcon", win.BOOL, win.HICON)
@@ -98,6 +116,22 @@ remove_subclass = api(controls, "RemoveWindowSubclass", win.BOOL, win.HWND, SUBC
 default_subclass = api(controls, "DefSubclassProc", LRESULT, win.HWND, win.UINT, win.WPARAM, win.LPARAM)
 
 
+def resolve_chord(keys, modifiers, layout):
+    codes = []
+    for key in keys:
+        code = HOTKEY_KEYS.get(key)
+        if code is None:
+            mapping = key_for_character(key, layout)
+            if not 0 <= mapping <= 0x07FF:
+                return None
+            for flag, modifier in CHARACTER_MODIFIERS.items():
+                if mapping >> 8 & flag:
+                    modifiers |= modifier
+            code = mapping & 0xFF
+        codes.append(code)
+    return (tuple(codes), modifiers) if codes[0] != codes[1] else None
+
+
 class TrayIcon:
     @staticmethod
     def open_existing():
@@ -111,6 +145,11 @@ class TrayIcon:
         self.next_page = next_page
         self.hotkey_id = None
         self.hotkey = ""
+        self.chord = None
+        self.chord_timer = None
+        self.chord_layout = None
+        self.chord_keys = None
+        self.chord_pressed = False
         self.available = False
         self.menu_open = False
         self.modern_notifications = False
@@ -145,22 +184,61 @@ class TrayIcon:
             self.data.szTip = tooltip
             notify_icon(NIM_MODIFY, ct.byref(self.data))
 
-    def set_hotkey(self, text):
-        canonical, modifiers, key = parse_hotkey(text)
+    def set_hotkey(self, text, *, validate_chord=True):
+        canonical, modifiers, keys = parse_hotkey(text)
         if canonical == self.hotkey:
             return canonical
         if not self.handle:
             raise ValueError("Windows nepřipravil příjem globální zkratky.")
         old = self.hotkey_id
         candidate = None
-        if key:
+        chord = None
+        if len(keys) == 1:
             candidate = 3 if old == 2 else 2
-            if not register_hotkey(self.handle, candidate, modifiers | MOD_NOREPEAT, key):
+            if not register_hotkey(self.handle, candidate, modifiers | MOD_NOREPEAT, HOTKEY_KEYS[keys[0]]):
                 raise ValueError("Tuto zkratku už používá Windows nebo jiná aplikace.")
+        elif len(keys) == 2:
+            if validate_chord and resolve_chord(keys, modifiers, get_keyboard_layout(0)) is None:
+                raise ValueError("Zkratku nelze na aktuálním rozložení stisknout jako dvě různé klávesy.")
+            chord = keys, modifiers
         if old is not None:
             unregister_hotkey(self.handle, old)
         self.hotkey_id, self.hotkey = candidate, canonical
+        self.stop_chord()
+        self.chord = chord
+        if chord is not None:
+            self.chord_layout = None
+            self.chord_timer = self.root.after(CHORD_POLL_MS, self.poll_chord)
         return canonical
+
+    def poll_chord(self):
+        keys, modifiers = self.chord
+        foreground = get_foreground_window()
+        layout = get_keyboard_layout(get_window_thread(foreground, None) if foreground else 0)
+        if layout != self.chord_layout:
+            self.chord_layout = layout
+            self.chord_keys = resolve_chord(keys, modifiers, layout)
+
+        pressed = False
+        if self.chord_keys is not None:
+            codes, expected = self.chord_keys
+            if all(async_key_state(code) < 0 for code in codes):
+                held = 0
+                for code, flag in MODIFIER_KEYS.items():
+                    if async_key_state(code) < 0:
+                        held |= flag
+                pressed = held == expected
+        if pressed and not self.chord_pressed:
+            self.root.after_idle(self.next_page)
+        self.chord_pressed = pressed
+        self.chord_timer = self.root.after(CHORD_POLL_MS, self.poll_chord)
+
+    def stop_chord(self):
+        if self.chord_timer is not None:
+            self.root.after_cancel(self.chord_timer)
+            self.chord_timer = None
+        self.chord = self.chord_keys = None
+        self.chord_pressed = False
 
     def window_proc(self, handle, message, wparam, lparam, _subclass_id, _reference):
         if message == self.taskbar_created:
@@ -210,6 +288,7 @@ class TrayIcon:
             actions[selection]()
 
     def close(self):
+        self.stop_chord()
         if self.available:
             notify_icon(NIM_DELETE, ct.byref(self.data))
             self.available = False

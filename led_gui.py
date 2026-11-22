@@ -1,15 +1,17 @@
 import asyncio
+import sys
 import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 from time import monotonic
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import psutil
 from PIL import Image, ImageTk
 from pypixelcolor import AsyncClient
 
+from app_update import APP_VERSION, check_for_update, download_update, install_update
 from display_pages import (
     NEWS_COLOR,
     NEWS_SPEED,
@@ -47,6 +49,7 @@ RECONNECT_DELAY = 10
 FETCH_INTERVALS = {Page.WEATHER: 900, Page.NEWS: 300}
 FETCH_RETRY = 60
 MAX_CONTENT_AGE = 3600
+UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 
 
 class PanelConnection:
@@ -121,8 +124,11 @@ class PanelWindow:
         self.next_refresh = 0.0
         self.retry_at = 0.0
         self.closing = False
+        self.update_job = None
+        self.available_update = None
+        self.next_update_check = monotonic() + 5
 
-        root.title("LED panel pro PC 1.2")
+        root.title(f"LED panel pro PC {APP_VERSION}")
         root.iconbitmap(default=str(ICON_PATH))
         root.configure(bg=BACKGROUND)
         root.resizable(False, False)
@@ -179,9 +185,19 @@ class PanelWindow:
         self.off_button.pack(side="right")
         self.on_button.pack(side="right", padx=(0, 8))
 
+        self.update_button = None
+        if getattr(sys, "frozen", False):
+            update_row = tk.Frame(main, bg=BACKGROUND)
+            update_row.pack(fill="x", pady=(12, 0))
+            self.update_button = self.button(update_row, "Zkontrolovat aktualizace", self.update_action)
+            self.update_button.pack(side="right")
+            self.update_status = self.label(update_row, f"Verze {APP_VERSION}", color=MUTED, bg=BACKGROUND)
+            self.update_status.configure(wraplength=295, justify="left")
+            self.update_status.pack(side="left")
+
         self.tray = TrayIcon(root, ICON_PATH, self.show_window, self.tray_actions, self.cycle_page)
         try:
-            shortcut = self.tray.set_hotkey(self.preferences.hotkey)
+            shortcut = self.tray.set_hotkey(self.preferences.hotkey, validate_chord=False)
         except ValueError:
             self.shortcut_hint.configure(text="Zkratka není aktivní")
         else:
@@ -242,6 +258,59 @@ class PanelWindow:
     def online(self, function, *args):
         return asyncio.run_coroutine_threadsafe(asyncio.to_thread(function, *args), self.loop)
 
+    def update_action(self):
+        update = self.available_update
+        if update is None:
+            self.check_updates(manual=True)
+        else:
+            self.update_button.configure(state="disabled")
+            self.update_status.configure(text=f"Stahuji verzi {update.version}…")
+            self.update_job = self.online(download_update, update), self.finish_install
+
+    def check_updates(self, *, manual):
+        self.next_update_check = monotonic() + UPDATE_CHECK_INTERVAL
+        self.update_button.configure(state="disabled")
+        if manual:
+            self.update_status.configure(text="Kontroluji vydání na GitHubu…")
+        self.update_job = self.online(check_for_update), lambda job: self.finish_update_check(job, manual)
+
+    def finish_update_check(self, job, manual):
+        try:
+            self.available_update = job.result()
+        except (OSError, ValueError) as error:
+            if manual:
+                self.update_status.configure(text=f"Kontrola se nezdařila. {error}")
+        else:
+            if self.available_update:
+                version = self.available_update.version
+                self.update_status.configure(text=f"Dostupná verze {version}")
+                self.update_button.configure(text="Nainstalovat a restartovat")
+            else:
+                text = f"Verze {APP_VERSION} je aktuální." if manual else f"Verze {APP_VERSION}"
+                self.update_status.configure(text=text)
+                self.update_button.configure(text="Zkontrolovat aktualizace")
+        self.update_button.configure(state="normal")
+
+    def finish_install(self, job):
+        try:
+            install_update(job.result())
+        except (OSError, ValueError) as error:
+            self.update_status.configure(text="Aktualizaci se nepodařilo nainstalovat.")
+            self.update_button.configure(state="normal")
+            self.show_window()
+            messagebox.showerror("Aktualizace LED Panel PC", str(error), parent=self.root)
+        else:
+            self.close()
+
+    def tick_update(self, now):
+        if self.update_job is not None:
+            job, callback = self.update_job
+            if job.done():
+                self.update_job = None
+                callback(job)
+        elif now >= self.next_update_check:
+            self.check_updates(manual=False)
+
     def select_page(self, page):
         self.page = page
         self.page_choice.set(page.value)
@@ -262,7 +331,7 @@ class PanelWindow:
         try:
             preferences.save(self.display_settings_path)
         except OSError:
-            self.tray.set_hotkey(old_hotkey)
+            self.tray.set_hotkey(old_hotkey, validate_chord=False)
             raise
         self.preferences = preferences
         self.shortcut_hint.configure(text=preferences.hotkey)
@@ -424,6 +493,10 @@ class PanelWindow:
             self.update_controls()
 
         now = monotonic()
+        if self.update_button is not None:
+            self.tick_update(now)
+            if self.closing:
+                return
         self.update_online(now)
         content = self.selected_content(now)
         if self.pending is None:
@@ -496,6 +569,8 @@ class PanelWindow:
             self.pending = None
         for _, job in self.content_jobs.values():
             job.cancel()
+        if self.update_job is not None:
+            self.update_job[0].cancel()
         closed = asyncio.run_coroutine_threadsafe(self.connection.disconnect(), self.loop)
 
         def finish():
