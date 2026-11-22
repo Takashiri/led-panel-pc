@@ -8,6 +8,8 @@ Program pro Windows posílá místní čas, vytížení CPU a obsazení RAM pře
 2. Vyber panel ze seznamu a klikni na **Připojit**. Pokud ho aplikace nenašla, zavři iPixel Color v telefonu a použij **Vyhledat**.
 3. **Zapnout** zobrazí stav PC a **Vypnout** zhasne panel. Aplikace si zapamatuje vybraný panel a jeho stav. Po dalším spuštění nebo výpadku Bluetooth se k němu zkusí znovu připojit.
 
+V kartě **Ovládání** najdeš náhled, výběr obrazovky a připojení. Zkratku, přechody, počasí a spuštění s Windows nastavíš v kartě **Nastavení**. Velikost okna můžeš upravit tažením za jeho okraj nebo maximalizací.
+
 Zavřením okna přes **×** se aplikace skryje k hodinám. Pravým kliknutím na její ikonu zobrazíš nabídku **Otevřít** a **Ukončit**. Volbou **Ukončit** aplikaci zavřeš úplně. Windows může ikonu umístit pod šipku **^**. Tlačítko **Odpojit** uvolní Bluetooth spojení a zastaví pokusy o připojení pro aktuální spuštění aplikace.
 
 V **Nastavení → Spuštění aplikace** můžeš zapnout **Spustit s Windows**. Aplikace se otevře po přihlášení k tvému účtu. Volba **Spustit skrytě u hodin** nechá hlavní okno skryté. Volba **Obnovit poslední obrazovku** se použije i při ručním spuštění. Když `.exe` přesuneš, otevři ho z nového umístění a znovu ulož nastavení, aby Windows použil novou cestu.
@@ -15,7 +17,7 @@ V **Nastavení → Spuštění aplikace** můžeš zapnout **Spustit s Windows**
 ## Obrazovky displeje
 
 - **Stav PC** zobrazuje hodiny, vytížení CPU a obsazení RAM.
-- **Počasí** zobrazuje teplotu ve °C a relativní vlhkost. V okně **Nastavení** vyhledej město, vyber odpovídající výsledek a klikni na **Uložit**. Aktuální modelová data dodává [Open-Meteo](https://open-meteo.com/en/docs). Bezplatné API je určené pro [nekomerční použití](https://open-meteo.com/en/terms).
+- **Počasí** zobrazuje teplotu ve °C a relativní vlhkost. V kartě **Nastavení** vyhledej město, vyber odpovídající výsledek a klikni na **Uložit**. Aktuální modelová data dodává [Open-Meteo](https://open-meteo.com/en/docs). Bezplatné API je určené pro [nekomerční použití](https://open-meteo.com/en/terms).
 - **Novinky.cz** posouvá první titulek z oficiálního RSS kanálu **Zpravodajství**. Aplikace ho načítá přímo na PC pro osobní zobrazení. [Tiráž a RSS kanály Novinky.cz](https://www.novinky.cz/p/tiraz)
 
 Obrazovky se přepínají výběrem v okně nebo výchozí zkratkou **Ctrl+Alt+F9**. Zkratku lze změnit v **Nastavení** a funguje i se skrytým oknem.

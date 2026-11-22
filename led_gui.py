@@ -25,8 +25,9 @@ from display_pages import (
     render_weather,
     ticker_font,
 )
-from display_settings import DisplaySettingsWindow
+from display_settings import DisplaySettings
 from display_transitions import Transition, TransitionSpeed, make_transition
+from gui_style import ACCENT, BACKGROUND, BORDER, ERROR, FIELD, FONT, MUTED, configure_theme, dark_caption, make_card
 from panel_preferences import DisplayPreferences, SavedPanel, settings_file
 from pc_status import (
     COLON_PHASE_MS,
@@ -40,13 +41,6 @@ from pc_status import (
 )
 from windows_tray import TrayIcon, show_foreground_window
 
-BACKGROUND = "#0e1522"
-SURFACE = "#182335"
-TEXT = "#f1f6fd"
-MUTED = "#aec0d6"
-ACCENT = "#7addfb"
-BUTTON = "#30425a"
-PREVIEW_SIZE = (512, 128)
 ICON_PATH = Path(__file__).with_name("led-panel.ico")
 RECONNECT_DELAY = 10
 FETCH_INTERVALS = {Page.WEATHER: 900, Page.NEWS: 300}
@@ -121,7 +115,7 @@ class PanelWindow:
         self.settings_path = settings_file()
         self.display_settings_path = self.settings_path.with_name("display.json")
         self.preferences = DisplayPreferences.load(self.display_settings_path)
-        self.settings_dialog = None
+        self.settings = None
         self.page = self.preferences.last_page or Page.PC
         self.sent_content = None
         self.content_cache = {}
@@ -143,6 +137,7 @@ class PanelWindow:
         self.preview_page = None
         self.preview_frame = None
         self.preview_animation = None
+        self.preview_size = PANEL_SIZE
         self.photo = None
         self.next_refresh = 0.0
         self.retry_at = 0.0
@@ -154,69 +149,23 @@ class PanelWindow:
         root.title(f"LED panel pro PC {APP_VERSION}")
         root.iconbitmap(default=str(ICON_PATH))
         root.configure(bg=BACKGROUND)
-        root.resizable(False, False)
+        root.geometry("752x625")
+        root.minsize(560, 535)
         root.protocol("WM_DELETE_WINDOW", self.hide_window)
-        main = tk.Frame(root, bg=BACKGROUND, padx=24, pady=20)
+        configure_theme(root)
+        root.after_idle(dark_caption, root)
+        main = ttk.Frame(root, padding=(24, 19, 24, 16))
         main.pack(fill="both", expand=True)
-        header = tk.Frame(main, bg=BACKGROUND)
-        header.pack(fill="x")
-        self.label(header, "LED panel pro PC", size=22, bold=True, bg=BACKGROUND).pack(side="left")
-        self.button(header, "Nastavení", self.open_settings).pack(side="right")
-        self.label(main, "Ovládání přes Bluetooth", color=MUTED, bg=BACKGROUND).pack(anchor="w", pady=(0, 16))
-
-        connection_card = tk.Frame(main, bg=SURFACE, padx=16, pady=13)
-        connection_card.pack(fill="x")
-        self.label(connection_card, "Bluetooth zařízení", bold=True).pack(anchor="w")
-        device_row = tk.Frame(connection_card, bg=SURFACE)
-        device_row.pack(fill="x", pady=(7, 8))
-        self.device = ttk.Combobox(device_row, state="disabled", font=("Segoe UI", 10))
-        self.device.pack(side="left", fill="x", expand=True, ipady=4)
-        self.scan_button = self.button(device_row, "Vyhledat", self.scan)
-        self.scan_button.pack(side="left", padx=(8, 0))
-        self.connect_button = self.button(device_row, "Připojit", self.toggle_connection)
-        self.connect_button.pack(side="left", padx=(8, 0))
-        self.message = self.label(connection_card, "Připraveno k vyhledání panelu.", color=MUTED)
-        self.message.configure(wraplength=500, justify="left")
-        self.message.pack(anchor="w")
-
-        preview_card = tk.Frame(main, bg=SURFACE, padx=16, pady=13)
-        preview_card.pack(fill="x", pady=(12, 0))
-        heading = tk.Frame(preview_card, bg=SURFACE)
-        heading.pack(fill="x", pady=(0, 9))
-        self.label(heading, "Náhled panelu", bold=True).pack(side="left")
-        self.page_choice = ttk.Combobox(heading, state="readonly", values=[page.value for page in Page], width=12)
-        self.page_choice.set(self.page.value)
-        self.page_choice.bind("<<ComboboxSelected>>", lambda _: self.select_page(Page(self.page_choice.get())))
-        self.page_choice.pack(side="right")
-        self.shortcut_hint = self.label(heading, "", color=MUTED, size=9)
-        self.shortcut_hint.pack(side="right", padx=(0, 10))
-        self.preview = tk.Canvas(preview_card, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1], bg="#080d16", highlightthickness=0)
-        self.preview.pack()
-        self.preview_image = self.preview.create_image(0, 0, anchor="nw")
-        self.preview_text = self.preview.create_text(
-            PREVIEW_SIZE[0] // 2, PREVIEW_SIZE[1] // 2, fill=MUTED, font=("Segoe UI", 11)
-        )
-        self.preview_detail = self.label(preview_card, "", color=MUTED, size=9)
-        self.preview_detail.configure(wraplength=512, justify="left")
-        self.preview_detail.pack(fill="x", pady=(6, 0))
-
-        power_row = tk.Frame(main, bg=BACKGROUND)
-        power_row.pack(fill="x", pady=(16, 0))
-        self.label(power_row, "Napájení displeje", bold=True, bg=BACKGROUND).pack(side="left")
-        self.on_button = self.button(power_row, "Zapnout", lambda: self.set_power(True), primary=True)
-        self.off_button = self.button(power_row, "Vypnout", lambda: self.set_power(False))
-        self.off_button.pack(side="right")
-        self.on_button.pack(side="right", padx=(0, 8))
-
-        self.update_button = None
-        if getattr(sys, "frozen", False):
-            update_row = tk.Frame(main, bg=BACKGROUND)
-            update_row.pack(fill="x", pady=(12, 0))
-            self.update_button = self.button(update_row, "Zkontrolovat aktualizace", self.update_action)
-            self.update_button.pack(side="right")
-            self.update_status = self.label(update_row, f"Verze {APP_VERSION}", color=MUTED, bg=BACKGROUND)
-            self.update_status.configure(wraplength=295, justify="left")
-            self.update_status.pack(side="left")
+        ttk.Label(main, text="LED Panel pro PC", style="Title.TLabel").pack(anchor="w", pady=(0, 13))
+        self.tabs = ttk.Notebook(main)
+        self.tabs.pack(fill="both", expand=True)
+        self.control_page = ttk.Frame(self.tabs, padding=(0, 12, 0, 0))
+        self.settings_page = ttk.Frame(self.tabs, padding=(0, 12, 0, 0))
+        self.tabs.add(self.control_page, text="Ovládání")
+        self.tabs.add(self.settings_page, text="Nastavení")
+        self.tabs.enable_traversal()
+        self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed)
+        self.build_controls(self.control_page)
 
         self.tray = TrayIcon(root, ICON_PATH, self.show_window, self.tray_actions, self.cycle_page)
         try:
@@ -232,19 +181,89 @@ class PanelWindow:
         self.update_controls()
         root.after(80, self.tick)
 
-    @staticmethod
-    def label(parent, text, *, size=10, color=TEXT, bold=False, bg=SURFACE):
-        return tk.Label(parent, text=text, bg=bg, fg=color, font=("Segoe UI", size, "bold" if bold else "normal"))
+    def build_controls(self, page):
+        preview_card, preview_body = make_card(page)
+        preview_card.pack(fill="both", expand=True)
+        toolbar = ttk.Frame(preview_body, style="Card.TFrame")
+        toolbar.pack(fill="x", pady=(0, 11))
+        ttk.Label(toolbar, text="Náhled displeje", style="Heading.Card.TLabel").pack(side="left")
+        screens = ttk.Frame(toolbar, style="Card.TFrame")
+        screens.pack(side="right")
+        self.page_choice = tk.StringVar(self.root, self.page.value)
+        for display_page in Page:
+            ttk.Radiobutton(screens, text=display_page.value, value=display_page.value, variable=self.page_choice,
+                            style="Screen.Toolbutton", command=lambda choice=display_page: self.select_page(choice)
+                            ).pack(side="left", padx=(4, 0))
+        self.preview = tk.Canvas(preview_body, width=1, height=1, background=FIELD, highlightbackground=BORDER,
+                                 highlightthickness=1, borderwidth=0)
+        self.preview.pack(fill="both", expand=True)
+        self.preview_image = self.preview.create_image(0, 0)
+        self.preview_text = self.preview.create_text(0, 0, fill=MUTED, font=FONT, justify="center")
+        self.preview.bind("<Configure>", self.resize_preview)
 
-    @staticmethod
-    def button(parent, text, command, *, primary=False):
-        return tk.Button(
-            parent, text=text, command=command, bg=ACCENT if primary else BUTTON,
-            fg=BACKGROUND if primary else TEXT, activebackground="#b9edfc" if primary else "#465d77",
-            activeforeground=BACKGROUND if primary else TEXT, disabledforeground="#a1b0c2",
-            font=("Segoe UI", 10, "bold"), relief="flat", padx=13, pady=5,
-            highlightthickness=1, highlightbackground=parent["bg"], highlightcolor=ACCENT,
-        )
+        preview_footer = ttk.Frame(preview_body, style="Card.TFrame")
+        preview_footer.pack(fill="x", pady=(9, 0))
+        self.shortcut_hint = ttk.Label(preview_footer, style="Muted.Card.TLabel")
+        self.shortcut_hint.pack(side="right", anchor="n", padx=(12, 0))
+        self.preview_detail = ttk.Label(preview_footer, style="Muted.Card.TLabel", justify="left")
+        self.preview_detail.pack(side="left", fill="x", expand=True)
+
+        connection_card, connection_body = make_card(page)
+        connection_card.pack(fill="x", pady=(12, 0))
+        power_row = ttk.Frame(connection_body, style="Card.TFrame")
+        power_row.pack(fill="x")
+        ttk.Label(power_row, text="Připojení Bluetooth", style="Heading.Card.TLabel").pack(side="left")
+        self.off_button = ttk.Button(power_row, text="Vypnout", command=lambda: self.set_power(False))
+        self.off_button.pack(side="right")
+        self.on_button = ttk.Button(power_row, text="Zapnout", style="Primary.TButton", command=lambda: self.set_power(True))
+        self.on_button.pack(side="right", padx=(8, 7))
+        ttk.Label(power_row, text="Napájení panelu", style="Muted.Card.TLabel").pack(side="right")
+
+        device_row = ttk.Frame(connection_body, style="Card.TFrame")
+        device_row.pack(fill="x", pady=(9, 7))
+        self.device = ttk.Combobox(device_row, state="disabled", font=FONT, width=1)
+        self.device.pack(side="left", fill="x", expand=True)
+        self.scan_button = ttk.Button(device_row, text="Vyhledat", command=self.scan)
+        self.scan_button.pack(side="left", padx=(8, 0))
+        self.connect_button = ttk.Button(device_row, text="Připojit", command=self.toggle_connection)
+        self.connect_button.pack(side="left", padx=(8, 0))
+        self.message = ttk.Label(connection_body, text="Připraveno k vyhledání panelu.", style="Muted.Card.TLabel", justify="left")
+        self.message.pack(fill="x")
+
+        self.update_button = None
+        if getattr(sys, "frozen", False):
+            update_row = ttk.Frame(page)
+            update_row.pack(fill="x", pady=(12, 0))
+            self.update_button = ttk.Button(update_row, text="Zkontrolovat aktualizace", command=self.update_action)
+            self.update_button.pack(side="right")
+            self.update_status = ttk.Label(update_row, text=f"Verze {APP_VERSION}", style="Muted.TLabel", justify="left")
+            self.update_status.pack(side="left", fill="x", expand=True, padx=(0, 12))
+            update_row.bind("<Configure>", lambda event: self.update_status.configure(
+                wraplength=max(1, event.width - self.update_button.winfo_reqwidth() - 12)))
+
+        connection_body.bind("<Configure>", lambda event: self.message.configure(wraplength=max(1, event.width - 32)))
+        preview_footer.bind("<Configure>", self.resize_preview_footer)
+
+    def resize_preview_footer(self, event):
+        available = event.width - self.shortcut_hint.winfo_reqwidth() - 12
+        self.preview_detail.configure(wraplength=max(1, available))
+
+    def resize_preview(self, event):
+        scale = max(1, min((event.width - 24) // PANEL_SIZE[0], (event.height - 24) // PANEL_SIZE[1]))
+        size = (PANEL_SIZE[0] * scale, PANEL_SIZE[1] * scale)
+        center = (event.width // 2, event.height // 2)
+        self.preview.coords(self.preview_image, *center)
+        self.preview.coords(self.preview_text, *center)
+        self.preview.itemconfigure(self.preview_text, width=max(1, event.width - 28))
+        if size != self.preview_size:
+            self.preview_size = size
+            if self.preview_frame is not None:
+                self.draw_preview_image(self.preview_frame)
+
+    def draw_preview_image(self, frame):
+        self.photo = ImageTk.PhotoImage(frame.resize(self.preview_size, Image.Resampling.NEAREST))
+        self.preview.itemconfigure(self.preview_image, image=self.photo)
+        self.preview.itemconfigure(self.preview_text, text="")
 
     def update_controls(self):
         ready = self.pending is None
@@ -340,7 +359,7 @@ class PanelWindow:
             try:
                 preferences.save(self.display_settings_path)
             except OSError:
-                self.message.configure(text="Poslední obrazovku se nepodařilo uložit.", fg=MUTED)
+                self.message.configure(text="Poslední obrazovku se nepodařilo uložit.", foreground=ERROR)
             else:
                 self.preferences = preferences
 
@@ -348,19 +367,22 @@ class PanelWindow:
         pages = tuple(Page)
         self.select_page(pages[(pages.index(self.page) + 1) % len(pages)])
 
-    def open_settings(self):
-        if self.settings_dialog and self.settings_dialog.window.winfo_exists():
-            self.settings_dialog.window.lift()
-        else:
-            startup = None
-            if getattr(sys, "frozen", False):
-                try:
-                    command = windows_startup.read_command()
-                except OSError as error:
-                    messagebox.showerror("Spuštění s Windows", str(error), parent=self.root)
-                else:
-                    startup = command is not None, bool(command and command.endswith(f" {windows_startup.TRAY_ARGUMENT}"))
-            self.settings_dialog = DisplaySettingsWindow(self.root, self.preferences, self.online, self.save_display, startup)
+    def tab_changed(self, _event):
+        if self.tabs.select() != str(self.settings_page):
+            return
+        self.preview_animation = self.preview_page = self.preview_key = None
+        if self.settings is not None:
+            return
+        startup = None
+        if getattr(sys, "frozen", False):
+            try:
+                command = windows_startup.read_command()
+            except OSError as error:
+                messagebox.showerror("Spuštění s Windows", str(error), parent=self.root)
+            else:
+                startup = command is not None, bool(command and command.endswith(f" {windows_startup.TRAY_ARGUMENT}"))
+        self.settings = DisplaySettings(self.settings_page, self.preferences, self.online, self.save_display, startup)
+        self.settings.pack(fill="both", expand=True)
 
     def save_display(self, hotkey, location, effect, speed, *, remember_page, startup):
         old_hotkey = self.tray.hotkey
@@ -426,7 +448,7 @@ class PanelWindow:
         if self.closing or self.pending is not None or self.connected:
             return
         self.target_panel = None
-        self.message.configure(text="Vyhledávám LED panely v okolí…", fg=MUTED)
+        self.message.configure(text="Vyhledávám LED panely v okolí…", foreground=MUTED)
         self.submit(find_panels(), self.scanned)
 
     def set_devices(self, devices):
@@ -443,14 +465,14 @@ class PanelWindow:
             text = "Vyber svůj panel a klikni na Připojit."
         else:
             text = "Panel se nenašel. Zkontroluj napájení, Bluetooth a zavři aplikaci iPixel Color."
-        self.message.configure(text=text, fg=MUTED)
+        self.message.configure(text=text, foreground=MUTED)
 
     def toggle_connection(self):
         if self.pending is not None:
             return
         if self.connected:
             self.target_panel = None
-            self.message.configure(text="Odpojuji panel…", fg=MUTED)
+            self.message.configure(text="Odpojuji panel…", foreground=MUTED)
             self.submit(self.connection.disconnect(), self.disconnected)
         elif self.target_panel is not None:
             self.target_panel = None
@@ -466,7 +488,7 @@ class PanelWindow:
 
     def connect(self):
         panel = self.target_panel
-        self.message.configure(text=f"Připojuji {panel.name}…", fg=MUTED)
+        self.message.configure(text=f"Připojuji {panel.name}…", foreground=MUTED)
         self.submit(self.connection.connect(panel.address), self.on_connected)
 
     def remember_panel(self):
@@ -491,20 +513,20 @@ class PanelWindow:
     def connection_message(self, text):
         if self.settings_error:
             text += " Nastavení se nepodařilo uložit."
-        self.message.configure(text=text, fg=ACCENT)
+        self.message.configure(text=text, foreground=ACCENT)
 
     def disconnected(self, _):
         self.connected = False
         self.powered = self.snapshot = None
         self.sent_content = None
-        self.message.configure(text="Panel je odpojený.", fg=MUTED)
+        self.message.configure(text="Panel je odpojený.", foreground=MUTED)
 
     def set_power(self, on):
         if not self.can_set_power(on):
             return
         self.target_panel = replace(self.target_panel, powered=on)
         self.remember_panel()
-        self.message.configure(text="Zapínám panel…" if on else "Vypínám panel…", fg=MUTED)
+        self.message.configure(text="Zapínám panel…" if on else "Vypínám panel…", foreground=MUTED)
         self.submit(self.connection.set_power(on), lambda snapshot: self.power_changed(on, snapshot))
 
     def power_changed(self, on, snapshot):
@@ -535,7 +557,7 @@ class PanelWindow:
                 self.retry_at = monotonic() + RECONNECT_DELAY
                 self.disconnected(None)
                 retry = f" Další pokus za {RECONNECT_DELAY} s." if self.target_panel else ""
-                self.message.configure(text=f"Bluetooth: {error}.{retry}", fg="#ffb6ac")
+                self.message.configure(text=f"Bluetooth: {error}.{retry}", foreground=ERROR)
                 self.submit(self.connection.disconnect(), lambda _: None)
             self.update_controls()
 
@@ -555,7 +577,7 @@ class PanelWindow:
                 self.submit(self.connection.verify_connection(), self.refreshed)
             elif not self.connected and self.target_panel is not None and now >= self.retry_at:
                 self.connect()
-        if self.root.state() != "withdrawn":
+        if self.root.state() in ("normal", "zoomed") and self.tabs.select() == str(self.control_page):
             self.update_preview(now, content)
         self.root.after(20 if self.preview_animation else 80, self.tick)
 
@@ -584,9 +606,7 @@ class PanelWindow:
         frame = self.transition_preview(page, frame, now)
         if frame is not None:
             if frame is not self.preview_frame:
-                self.photo = ImageTk.PhotoImage(frame.resize(PREVIEW_SIZE, Image.Resampling.NEAREST))
-                self.preview.itemconfigure(self.preview_image, image=self.photo)
-                self.preview.itemconfigure(self.preview_text, text="")
+                self.draw_preview_image(frame)
         else:
             self.preview.itemconfigure(self.preview_image, image="")
             self.photo = None
@@ -636,6 +656,8 @@ class PanelWindow:
             self.pending = None
         for _, job in self.content_jobs.values():
             job.cancel()
+        if self.settings is not None:
+            self.settings.cancel_search()
         if self.update_job is not None:
             self.update_job[0].cancel()
         closed = asyncio.run_coroutine_threadsafe(self.connection.disconnect(), self.loop)
