@@ -1,5 +1,7 @@
 import asyncio
 import tkinter as tk
+from dataclasses import replace
+from pathlib import Path
 from threading import Thread
 from time import monotonic
 from tkinter import ttk
@@ -8,6 +10,7 @@ import psutil
 from PIL import Image, ImageTk
 from pypixelcolor import AsyncClient
 
+from panel_preferences import SavedPanel, settings_file
 from pc_status import (
     COLON_PHASE_MS,
     PANEL_BRIGHTNESS,
@@ -18,6 +21,7 @@ from pc_status import (
     read_status,
     render_status,
 )
+from windows_tray import TrayIcon
 
 BACKGROUND = "#0e1522"
 SURFACE = "#182335"
@@ -26,6 +30,8 @@ MUTED = "#aec0d6"
 ACCENT = "#7addfb"
 BUTTON = "#30425a"
 PREVIEW_SIZE = (512, 128)
+ICON_PATH = Path(__file__).with_name("led-panel.ico")
+RECONNECT_DELAY = 10
 
 
 class PanelConnection:
@@ -61,10 +67,17 @@ class PanelConnection:
         await self.panel.send_image_hex(encode_status_animation(*status), ".gif", save_slot=0)
         return status
 
+    async def verify_connection(self):
+        self.panel.get_device_info()
+
 
 class PanelWindow:
     def __init__(self, root):
         self.root = root
+        self.settings_path = settings_file()
+        self.saved_panel = SavedPanel.load(self.settings_path)
+        self.target_panel = self.saved_panel
+        self.settings_error = False
         self.connection = PanelConnection()
         self.loop = asyncio.new_event_loop()
         Thread(target=self.loop.run_forever, daemon=True).start()
@@ -76,12 +89,14 @@ class PanelWindow:
         self.preview_key = None
         self.photo = None
         self.next_refresh = 0.0
+        self.retry_at = 0.0
         self.closing = False
 
-        root.title("LED panel pro PC")
+        root.title("LED panel pro PC 1.1")
+        root.iconbitmap(default=str(ICON_PATH))
         root.configure(bg=BACKGROUND)
         root.resizable(False, False)
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.protocol("WM_DELETE_WINDOW", self.hide_window)
         main = tk.Frame(root, bg=BACKGROUND, padx=24, pady=20)
         main.pack(fill="both", expand=True)
         self.label(main, "LED panel pro PC", size=22, bold=True, bg=BACKGROUND).pack(anchor="w")
@@ -123,8 +138,12 @@ class PanelWindow:
         self.off_button.pack(side="right")
         self.on_button.pack(side="right", padx=(0, 8))
 
+        self.tray = TrayIcon(root, ICON_PATH, self.show_window, self.tray_actions)
+        if self.saved_panel:
+            self.set_devices([(self.saved_panel.name, self.saved_panel.address, 0)])
+        else:
+            root.after(150, self.scan)
         self.update_controls()
-        root.after(150, self.scan)
         root.after(80, self.tick)
 
     @staticmethod
@@ -145,46 +164,103 @@ class PanelWindow:
         ready = self.pending is None
         self.device.configure(state="readonly" if ready and self.devices and not self.connected else "disabled")
         self.scan_button.configure(state="normal" if ready and not self.connected else "disabled")
+        connecting = self.target_panel is not None and not self.connected
+        connection_label = "Odpojit" if self.connected else "Zrušit pokusy" if connecting else "Připojit"
         self.connect_button.configure(
-            text="Odpojit" if self.connected else "Připojit",
-            state="normal" if ready and (self.connected or self.devices) else "disabled",
+            text=connection_label,
+            state="normal" if ready and (self.connected or connecting or self.devices) else "disabled",
         )
-        self.on_button.configure(state="normal" if ready and self.connected and self.powered is not True else "disabled")
-        self.off_button.configure(state="normal" if ready and self.connected and self.powered is not False else "disabled")
+        self.on_button.configure(state="normal" if self.can_set_power(True) else "disabled")
+        self.off_button.configure(state="normal" if self.can_set_power(False) else "disabled")
+        status = {True: "zapnuto", False: "vypnuto", None: "připojeno"}[self.powered] if self.connected else "odpojeno"
+        self.tray.set_tooltip(status)
+
+    def can_set_power(self, on):
+        return self.pending is None and self.connected and self.powered is not on
+
+    def tray_actions(self):
+        return (
+            ("Otevřít aplikaci", self.show_window),
+            ("Zapnout panel", (lambda: self.set_power(True)) if self.can_set_power(True) else None),
+            ("Vypnout panel", (lambda: self.set_power(False)) if self.can_set_power(False) else None),
+            (None, None),
+            ("Ukončit", self.close),
+        )
 
     def submit(self, coroutine, callback):
         self.pending = asyncio.run_coroutine_threadsafe(coroutine, self.loop), callback
         self.update_controls()
 
     def scan(self):
-        if self.closing:
+        if self.closing or self.pending is not None or self.connected:
             return
+        self.target_panel = None
         self.message.configure(text="Vyhledávám LED panely v okolí…", fg=MUTED)
         self.submit(find_panels(), self.scanned)
 
-    def scanned(self, devices):
+    def set_devices(self, devices):
         self.devices = devices
         self.device.configure(values=[f"{name}  ·  {address}" for name, address, _ in devices])
         if devices:
             self.device.current(0)
-            text = "Vyber svůj panel a klikni na Připojit."
         else:
             self.device.set("")
+
+    def scanned(self, devices):
+        self.set_devices(devices)
+        if devices:
+            text = "Vyber svůj panel a klikni na Připojit."
+        else:
             text = "Panel se nenašel. Zkontroluj napájení, Bluetooth a zavři aplikaci iPixel Color."
         self.message.configure(text=text, fg=MUTED)
 
     def toggle_connection(self):
+        if self.pending is not None:
+            return
         if self.connected:
+            self.target_panel = None
             self.message.configure(text="Odpojuji panel…", fg=MUTED)
             self.submit(self.connection.disconnect(), self.disconnected)
+        elif self.target_panel is not None:
+            self.target_panel = None
+            self.disconnected(None)
+            self.update_controls()
         else:
-            name, address, _ = self.devices[self.device.current()]
-            self.message.configure(text=f"Připojuji {name}…", fg=MUTED)
-            self.submit(self.connection.connect(address), self.on_connected)
+            selected = self.device.current()
+            if selected >= 0:
+                name, address, _ = self.devices[selected]
+                previous = self.saved_panel
+                self.target_panel = SavedPanel(name, address, previous.powered if previous and previous.address == address else None)
+                self.connect()
+
+    def connect(self):
+        panel = self.target_panel
+        self.message.configure(text=f"Připojuji {panel.name}…", fg=MUTED)
+        self.submit(self.connection.connect(panel.address), self.on_connected)
+
+    def remember_panel(self):
+        panel = self.target_panel
+        if panel != self.saved_panel or self.settings_error:
+            self.saved_panel = panel
+            try:
+                panel.save(self.settings_path)
+                self.settings_error = False
+            except OSError:
+                self.settings_error = True
 
     def on_connected(self, _):
         self.connected = True
-        self.message.configure(text="Připojeno. Zvol Zapnout nebo Vypnout.", fg=ACCENT)
+        self.remember_panel()
+        self.refreshed(None)
+        if self.target_panel.powered is None:
+            self.connection_message("Připojeno. Zvol Zapnout nebo Vypnout.")
+        else:
+            self.set_power(self.target_panel.powered)
+
+    def connection_message(self, text):
+        if self.settings_error:
+            text += " Nastavení se nepodařilo uložit."
+        self.message.configure(text=text, fg=ACCENT)
 
     def disconnected(self, _):
         self.connected = False
@@ -192,13 +268,17 @@ class PanelWindow:
         self.message.configure(text="Panel je odpojený.", fg=MUTED)
 
     def set_power(self, on):
+        if not self.can_set_power(on):
+            return
+        self.target_panel = replace(self.target_panel, powered=on)
+        self.remember_panel()
         self.message.configure(text="Zapínám panel…" if on else "Vypínám panel…", fg=MUTED)
         self.submit(self.connection.set_power(on), lambda snapshot: self.power_changed(on, snapshot))
 
     def power_changed(self, on, snapshot):
         self.powered = on
         self.refreshed(snapshot)
-        self.message.configure(text="Panel je zapnutý. Zobrazuje stav PC." if on else "Panel je vypnutý.", fg=ACCENT)
+        self.connection_message("Panel je zapnutý. Zobrazuje stav PC." if on else "Panel je vypnutý.")
 
     def refreshed(self, snapshot):
         self.snapshot = snapshot
@@ -213,15 +293,22 @@ class PanelWindow:
             try:
                 callback(future.result())
             except Exception as error:
+                self.retry_at = monotonic() + RECONNECT_DELAY
                 self.disconnected(None)
-                self.message.configure(text=f"Bluetooth: {error}", fg="#ffb6ac")
+                retry = f" Další pokus za {RECONNECT_DELAY} s." if self.target_panel else ""
+                self.message.configure(text=f"Bluetooth: {error}.{retry}", fg="#ffb6ac")
                 self.submit(self.connection.disconnect(), lambda _: None)
             self.update_controls()
 
         now = monotonic()
-        if self.pending is None and self.powered and now >= self.next_refresh:
-            self.submit(self.connection.refresh(), self.refreshed)
-        self.update_preview(now)
+        if self.pending is None:
+            if self.connected and now >= self.next_refresh:
+                poll = self.connection.refresh if self.powered else self.connection.verify_connection
+                self.submit(poll(), self.refreshed)
+            elif not self.connected and self.target_panel is not None and now >= self.retry_at:
+                self.connect()
+        if self.root.state() != "withdrawn":
+            self.update_preview(now)
         self.root.after(80, self.tick)
 
     def update_preview(self, now):
@@ -241,8 +328,22 @@ class PanelWindow:
             text = "Displej je vypnutý" if self.powered is False else "Živý náhled se zobrazí po zapnutí"
             self.preview.itemconfigure(self.preview_text, text=text)
 
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide_window(self):
+        if self.tray.available:
+            self.root.withdraw()
+        else:
+            self.close()
+
     def close(self):
+        if self.closing:
+            return
         self.closing = True
+        self.tray.close()
         self.root.withdraw()
         if self.pending is not None:
             self.pending[0].cancel()
@@ -259,7 +360,7 @@ class PanelWindow:
         finish()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and not TrayIcon.open_existing():
     window = tk.Tk()
     PanelWindow(window)
     window.mainloop()

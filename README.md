@@ -6,7 +6,9 @@ Program pro Windows posílá místní čas, vytížení CPU a obsazení RAM pře
 
 1. Stáhni [LED-Panel.exe](https://github.com/Takashiri/led-panel-pc/releases/latest/download/LED-Panel.exe), zapni Bluetooth ve Windows a připoj napájení panelu.
 2. Vyber panel ze seznamu a klikni na **Připojit**. Pokud ho aplikace nenašla, zavři iPixel Color v telefonu a použij **Vyhledat**.
-3. **Zapnout** zobrazí stav PC. **Vypnout** zhasne panel a pozastaví aktualizaci. **Odpojit** uvolní Bluetooth spojení.
+3. **Zapnout** zobrazí stav PC a **Vypnout** zhasne panel. Aplikace si zapamatuje vybraný panel a jeho stav. Po dalším spuštění nebo výpadku Bluetooth se k němu zkusí znovu připojit.
+
+Zavřením okna přes **×** se aplikace skryje k hodinám. Kliknutím na její ikonu otevřeš okno. Pravým kliknutím otevřeš nabídku **Zapnout panel**, **Vypnout panel** a **Ukončit**. Windows může ikonu umístit pod šipku **^**. Tlačítko **Odpojit** uvolní Bluetooth spojení a zastaví pokusy o připojení pro aktuální spuštění aplikace.
 
 Soubor `.exe` lze použít samostatně na 64bitových Windows 10 nebo 11 s Bluetooth LE. Pro jeden panel používej jedno ovládání.
 
