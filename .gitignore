@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+preview.png
+build/
+dist/
+LED-Panel.spec
