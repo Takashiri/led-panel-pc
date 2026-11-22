@@ -8,7 +8,9 @@ Program pro Windows posílá místní čas, vytížení CPU a obsazení RAM pře
 2. Vyber panel ze seznamu a klikni na **Připojit**. Pokud ho aplikace nenašla, zavři iPixel Color v telefonu a použij **Vyhledat**.
 3. **Zapnout** zobrazí stav PC a **Vypnout** zhasne panel. Aplikace si zapamatuje vybraný panel a jeho stav. Po dalším spuštění nebo výpadku Bluetooth se k němu zkusí znovu připojit.
 
-Zavřením okna přes **×** se aplikace skryje k hodinám. Kliknutím na její ikonu otevřeš okno. Pravým kliknutím otevřeš nabídku **Zapnout panel**, **Vypnout panel** a **Ukončit**. Windows může ikonu umístit pod šipku **^**. Tlačítko **Odpojit** uvolní Bluetooth spojení a zastaví pokusy o připojení pro aktuální spuštění aplikace.
+Zavřením okna přes **×** se aplikace skryje k hodinám. Pravým kliknutím na její ikonu zobrazíš nabídku **Otevřít** a **Ukončit**. Volbou **Ukončit** aplikaci zavřeš úplně. Windows může ikonu umístit pod šipku **^**. Tlačítko **Odpojit** uvolní Bluetooth spojení a zastaví pokusy o připojení pro aktuální spuštění aplikace.
+
+V **Nastavení → Spuštění aplikace** můžeš zapnout **Spustit s Windows**. Aplikace se otevře po přihlášení k tvému účtu. Volba **Spustit skrytě u hodin** nechá hlavní okno skryté. Volba **Obnovit poslední obrazovku** se použije i při ručním spuštění. Když `.exe` přesuneš, otevři ho z nového umístění a znovu ulož nastavení, aby Windows použil novou cestu.
 
 ## Obrazovky displeje
 
@@ -16,9 +18,11 @@ Zavřením okna přes **×** se aplikace skryje k hodinám. Kliknutím na její 
 - **Počasí** zobrazuje teplotu ve °C a relativní vlhkost. V okně **Nastavení** vyhledej město, vyber odpovídající výsledek a klikni na **Uložit**. Aktuální modelová data dodává [Open-Meteo](https://open-meteo.com/en/docs). Bezplatné API je určené pro [nekomerční použití](https://open-meteo.com/en/terms).
 - **Novinky.cz** posouvá první titulek z oficiálního RSS kanálu **Zpravodajství**. Aplikace ho načítá přímo na PC pro osobní zobrazení. [Tiráž a RSS kanály Novinky.cz](https://www.novinky.cz/p/tiraz)
 
-Obrazovky se přepínají výběrem v okně, volbou **Další obrazovka** u hodin nebo výchozí zkratkou **Ctrl+Alt+F9**. Zkratku lze změnit v **Nastavení** a funguje i se skrytým oknem.
+Obrazovky se přepínají výběrem v okně nebo výchozí zkratkou **Ctrl+Alt+F9**. Zkratku lze změnit v **Nastavení** a funguje i se skrytým oknem.
 
 Můžeš použít i dvě běžné klávesy současně, například `§+)` na českém rozložení. Přidrž jednu, stiskni druhou a uvolni je. Znaky se určují podle aktuálního rozložení klávesnice.
+
+V **Nastavení → Přechod mezi obrazovkami** vyber efekt a rychlost. Jeden efekt platí pro všechna přepnutí na panelu i v náhledu. K dispozici je deset animací a volba **Bez animace**. Výchozí posun doleva trvá zhruba půl sekundy samotného přehrávání. Pravidelná obnova údajů používá stejnou obrazovku a přechod nespouští.
 
 Na LED panelu a v jeho náhledu se text kreslí ostrými pixely bez diakritiky. V okně aplikace se zobrazují původní názvy a titulky.
 

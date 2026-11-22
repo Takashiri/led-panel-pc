@@ -5,7 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from display_pages import Location
+from display_pages import Location, Page
+from display_transitions import Transition, TransitionSpeed
 from pc_status import ADDRESS_PATTERN
 
 
@@ -61,16 +62,35 @@ class SavedPanel:
 DEFAULT_HOTKEY = "Ctrl+Alt+F9"
 
 
+def load_choice(data, key, default):
+    try:
+        return type(default)(data.get(key, default))
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class DisplayPreferences:
     hotkey: str = DEFAULT_HOTKEY
     location: Location | None = None
+    transition: Transition = Transition.SLIDE_LEFT
+    speed: TransitionSpeed = TransitionSpeed.BALANCED
+    last_page: Page | None = None
 
     @classmethod
     def load(cls, path):
         data = read_settings(path)
         hotkey = data.get("hotkey", DEFAULT_HOTKEY)
-        return cls(hotkey if isinstance(hotkey, str) else DEFAULT_HOTKEY, Location.from_mapping(data.get("location")))
+        last_page = data.get("last_page")
+        return cls(
+            hotkey if isinstance(hotkey, str) else DEFAULT_HOTKEY,
+            Location.from_mapping(data.get("location")),
+            load_choice(data, "transition", Transition.SLIDE_LEFT),
+            load_choice(data, "speed", TransitionSpeed.BALANCED),
+            Page.__members__.get(last_page) if isinstance(last_page, str) else None,
+        )
 
     def save(self, path):
-        write_settings(path, asdict(self))
+        data = asdict(self)
+        data["last_page"] = self.last_page.name if self.last_page else None
+        write_settings(path, data)

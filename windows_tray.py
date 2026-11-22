@@ -1,6 +1,7 @@
 """Windows notification area icon and its native context menu."""
 
 import ctypes as ct
+from collections import deque
 from ctypes import wintypes as win
 
 
@@ -15,6 +16,7 @@ MODIFIER_KEYS = {0x11: MODIFIERS["Ctrl"], 0x12: MODIFIERS["Alt"], 0x10: MODIFIER
 CHARACTER_MODIFIERS = {1: MODIFIERS["Shift"], 2: MODIFIERS["Ctrl"], 4: MODIFIERS["Alt"]}
 MOD_NOREPEAT = 0x4000
 CHORD_POLL_MS = 20
+TRAY_POLL_MS = 20
 HOTKEY_KEYS = {chr(code): code for code in (*range(48, 58), *range(65, 91))}
 HOTKEY_KEYS.update({f"F{number}": 0x6F + number for number in range(1, 25) if number != 12})
 WM_LBUTTONUP = 0x0202
@@ -25,8 +27,9 @@ NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETFOCUS, NIM_SETVERSION = range(5)
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_SHOWTIP = 1, 2, 4, 0x80
 NOTIFYICON_VERSION_4 = 4
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+GA_ROOT = 2
 MF_GRAYED, MF_SEPARATOR = 1, 0x0800
-TPM_RIGHTBUTTON, TPM_RETURNCMD = 2, 0x0100
+TPM_LEFTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD = 0, 0x0080, 0x0100
 
 LRESULT = ct.c_ssize_t
 UINT_PTR = ct.c_size_t
@@ -96,6 +99,7 @@ register_message = api(user, "RegisterWindowMessageW", win.UINT, win.LPCWSTR)
 register_hotkey = api(user, "RegisterHotKey", win.BOOL, win.HWND, ct.c_int, win.UINT, win.UINT)
 unregister_hotkey = api(user, "UnregisterHotKey", win.BOOL, win.HWND, ct.c_int)
 get_foreground_window = api(user, "GetForegroundWindow", win.HWND)
+get_ancestor = api(user, "GetAncestor", win.HWND, win.HWND, win.UINT)
 get_window_thread = api(user, "GetWindowThreadProcessId", win.DWORD, win.HWND, ct.POINTER(win.DWORD))
 get_keyboard_layout = api(user, "GetKeyboardLayout", win.HANDLE, win.DWORD)
 key_for_character = api(user, "VkKeyScanExW", ct.c_short, win.WCHAR, win.HANDLE)
@@ -132,11 +136,24 @@ def resolve_chord(keys, modifiers, layout):
     return (tuple(codes), modifiers) if codes[0] != codes[1] else None
 
 
+def show_foreground_window(window):
+    window.deiconify()
+    window.update_idletasks()
+    handle = get_ancestor(window.winfo_id(), GA_ROOT)
+    if not (handle and set_foreground(handle)):
+        # Raise the window once if Windows declines the keyboard activation.
+        if not window.attributes("-topmost"):
+            window.attributes("-topmost", True)
+            window.after_idle(window.attributes, "-topmost", False)
+        window.lift()
+    window.focus_force()
+
+
 class TrayIcon:
     @staticmethod
-    def open_existing():
+    def open_existing(*, show=True):
         handle = find_window("Static", WINDOW_NAME)
-        return bool(handle and post_message(handle, OPEN_MESSAGE, 0, 0))
+        return bool(handle and (not show or post_message(handle, OPEN_MESSAGE, 0, 0)))
 
     def __init__(self, root, icon_path, show_window, actions, next_page):
         self.root = root
@@ -150,8 +167,11 @@ class TrayIcon:
         self.chord_layout = None
         self.chord_keys = None
         self.chord_pressed = False
+        self.events = deque()
+        self.event_timer = None
         self.available = False
         self.menu_open = False
+        self.menu_requested = False
         self.modern_notifications = False
         self.taskbar_created = register_message("TaskbarCreated")
         self.callback = SUBCLASSPROC(self.window_proc)
@@ -169,6 +189,7 @@ class TrayIcon:
 
         if self.handle and self.icon and set_subclass(self.handle, self.callback, 1, 0):
             self.add_icon()
+            self.event_timer = self.root.after(TRAY_POLL_MS, self.dispatch_events)
         else:
             self.close()
 
@@ -241,26 +262,40 @@ class TrayIcon:
         self.chord_pressed = False
 
     def window_proc(self, handle, message, wparam, lparam, _subclass_id, _reference):
-        if message == self.taskbar_created:
-            self.add_icon()
+        # Windows can dispatch this callback while Tk's notifier is active.
+        # Queue GUI actions for the regular Tk event loop instead of calling Tk here.
+        if self.taskbar_created and message == self.taskbar_created:
+            self.events.append(self.add_icon)
             return 0
         if message == OPEN_MESSAGE:
-            self.root.after_idle(self.show_window)
+            self.events.append(self.show_window)
             return 0
         if message == WM_HOTKEY and wparam == self.hotkey_id:
-            self.root.after_idle(self.next_page)
+            self.events.append(self.next_page)
             return 0
         if message == TRAY_MESSAGE:
             event = lparam & 0xFFFF
             menu_event = WM_CONTEXTMENU if self.modern_notifications else WM_RBUTTONUP
             if event == menu_event:
-                self.root.after_idle(self.show_menu)
+                if not self.menu_open and not self.menu_requested:
+                    self.menu_requested = True
+                    self.events.append(self.show_menu)
             elif event in (NIN_SELECT, NIN_KEYSELECT) or (not self.modern_notifications and event == WM_LBUTTONUP):
-                self.root.after_idle(self.show_window)
+                self.events.append(self.show_window)
             return 0
         return default_subclass(handle, message, wparam, lparam)
 
+    def dispatch_events(self):
+        self.event_timer = None
+        try:
+            while self.handle and self.events:
+                self.events.popleft()()
+        finally:
+            if self.handle:
+                self.event_timer = self.root.after(TRAY_POLL_MS, self.dispatch_events)
+
     def show_menu(self):
+        self.menu_requested = False
         if self.menu_open or not self.handle:
             return
         menu = create_menu()
@@ -278,17 +313,24 @@ class TrayIcon:
             point = win.POINT()
             cursor_position(ct.byref(point))
             set_foreground(self.handle)
-            selection = track_menu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, self.handle, None)
+            selection = track_menu(menu, TPM_LEFTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                                   point.x, point.y, 0, self.handle, None)
             post_message(self.handle, 0, 0, 0)  # WM_NULL completes menu dismissal.
-            notify_icon(NIM_SETFOCUS, ct.byref(self.data))
         finally:
             destroy_menu(menu)
             self.menu_open = False
-        if selection in actions:
-            actions[selection]()
+        action = actions.get(selection)
+        if action is None:
+            notify_icon(NIM_SETFOCUS, ct.byref(self.data))
+        else:
+            action()
 
     def close(self):
         self.stop_chord()
+        if self.event_timer is not None:
+            self.root.after_cancel(self.event_timer)
+            self.event_timer = None
+        self.events.clear()
         if self.available:
             notify_icon(NIM_DELETE, ct.byref(self.data))
             self.available = False

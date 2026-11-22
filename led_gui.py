@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import tkinter as tk
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
@@ -11,6 +12,7 @@ import psutil
 from PIL import Image, ImageTk
 from pypixelcolor import AsyncClient
 
+import windows_startup
 from app_update import APP_VERSION, check_for_update, download_update, install_update
 from display_pages import (
     NEWS_COLOR,
@@ -24,6 +26,7 @@ from display_pages import (
     ticker_font,
 )
 from display_settings import DisplaySettingsWindow
+from display_transitions import Transition, TransitionSpeed, make_transition
 from panel_preferences import DisplayPreferences, SavedPanel, settings_file
 from pc_status import (
     COLON_PHASE_MS,
@@ -35,7 +38,7 @@ from pc_status import (
     read_status,
     render_status,
 )
-from windows_tray import TrayIcon
+from windows_tray import TrayIcon, show_foreground_window
 
 BACKGROUND = "#0e1522"
 SURFACE = "#182335"
@@ -52,9 +55,19 @@ MAX_CONTENT_AGE = 3600
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 
 
+def render_page_frame(content, snapshot, *, show_colon=True, news_offset=0):
+    page, location, data, notice = content
+    if page is Page.PC:
+        return render_status(*snapshot, show_colon=show_colon) if snapshot else None
+    if page is Page.WEATHER:
+        return render_weather(location, data, notice)
+    return render_news(data, notice, news_offset)
+
+
 class PanelConnection:
     def __init__(self):
         self.panel = None
+        self.displayed = None
 
     async def connect(self, address):
         panel = AsyncClient(address)
@@ -66,6 +79,7 @@ class PanelConnection:
             raise RuntimeError(f"Panel má {info.width} × {info.height} px. Aplikace podporuje 64 × 16 px.")
 
     async def disconnect(self):
+        self.displayed = None
         if self.panel is not None:
             panel, self.panel = self.panel, None
             await panel.disconnect()
@@ -74,22 +88,28 @@ class PanelConnection:
         if on:
             await self.panel.set_brightness(PANEL_BRIGHTNESS)
         await self.panel.set_power(on)
+        self.displayed = None
         if on:
             psutil.cpu_percent()
             await asyncio.sleep(0.5)
 
-    async def refresh(self, page, location, data, notice):
+    async def refresh(self, page, location, data, notice, *, effect=Transition.NONE, speed=TransitionSpeed.BALANCED):
+        status = read_status() if page is Page.PC else None
+        frame = render_page_frame((page, location, data, notice), status)
+        if self.displayed is not None and self.displayed[0] is not page and effect is not Transition.NONE:
+            animation = make_transition(self.displayed[1], frame, effect, speed)
+            await self.panel.send_image_hex(animation.panel_gif(), ".gif", save_slot=0)
+            await asyncio.sleep(animation.duration)
+
         if page is Page.PC:
-            status = read_status()
             await self.panel.send_image_hex(encode_status_animation(*status), ".gif", save_slot=0)
-            return status
-        if page is Page.NEWS and data is not None:
+        elif page is Page.NEWS and data is not None:
             await self.panel.send_text(data.ticker, animation="scroll_left", speed=NEWS_SPEED,
                                        color=NEWS_COLOR, font=ticker_font(), save_slot=0)
         else:
-            frame = render_weather(location, data, notice) if page is Page.WEATHER else render_news(None, notice)
             await self.panel.send_image_hex(png_hex(frame), ".png", save_slot=0)
-        return None
+        self.displayed = page, frame
+        return status
 
     async def verify_connection(self):
         self.panel.get_device_info()
@@ -102,7 +122,7 @@ class PanelWindow:
         self.display_settings_path = self.settings_path.with_name("display.json")
         self.preferences = DisplayPreferences.load(self.display_settings_path)
         self.settings_dialog = None
-        self.page = Page.PC
+        self.page = self.preferences.last_page or Page.PC
         self.sent_content = None
         self.content_cache = {}
         self.content_errors = {}
@@ -120,6 +140,9 @@ class PanelWindow:
         self.powered = None
         self.snapshot = None
         self.preview_key = None
+        self.preview_page = None
+        self.preview_frame = None
+        self.preview_animation = None
         self.photo = None
         self.next_refresh = 0.0
         self.retry_at = 0.0
@@ -243,11 +266,7 @@ class PanelWindow:
 
     def tray_actions(self):
         return (
-            ("Otevřít aplikaci", self.show_window),
-            ("Zapnout panel", (lambda: self.set_power(True)) if self.can_set_power(True) else None),
-            ("Vypnout panel", (lambda: self.set_power(False)) if self.can_set_power(False) else None),
-            ("Další obrazovka", self.cycle_page),
-            (None, None),
+            ("Otevřít", self.show_window),
             ("Ukončit", self.close),
         )
 
@@ -313,7 +332,17 @@ class PanelWindow:
 
     def select_page(self, page):
         self.page = page
+        if page is Page.PC and self.snapshot is None and self.powered is True:
+            self.snapshot = read_status()
         self.page_choice.set(page.value)
+        if self.preferences.last_page is not None and self.preferences.last_page is not page:
+            preferences = replace(self.preferences, last_page=page)
+            try:
+                preferences.save(self.display_settings_path)
+            except OSError:
+                self.message.configure(text="Poslední obrazovku se nepodařilo uložit.", fg=MUTED)
+            else:
+                self.preferences = preferences
 
     def cycle_page(self):
         pages = tuple(Page)
@@ -323,16 +352,32 @@ class PanelWindow:
         if self.settings_dialog and self.settings_dialog.window.winfo_exists():
             self.settings_dialog.window.lift()
         else:
-            self.settings_dialog = DisplaySettingsWindow(self.root, self.preferences, self.online, self.save_display)
+            startup = None
+            if getattr(sys, "frozen", False):
+                try:
+                    command = windows_startup.read_command()
+                except OSError as error:
+                    messagebox.showerror("Spuštění s Windows", str(error), parent=self.root)
+                else:
+                    startup = command is not None, bool(command and command.endswith(f" {windows_startup.TRAY_ARGUMENT}"))
+            self.settings_dialog = DisplaySettingsWindow(self.root, self.preferences, self.online, self.save_display, startup)
 
-    def save_display(self, hotkey, location):
+    def save_display(self, hotkey, location, effect, speed, *, remember_page, startup):
         old_hotkey = self.tray.hotkey
-        preferences = DisplayPreferences(self.tray.set_hotkey(hotkey), location)
-        try:
+        with ExitStack() as rollback:
+            hotkey = self.tray.set_hotkey(hotkey)
+            if hotkey != old_hotkey:
+                rollback.callback(self.tray.set_hotkey, old_hotkey, validate_chord=False)
+            if startup is not None:
+                enabled, hidden = startup
+                previous = windows_startup.read_command()
+                command = windows_startup.make_command(sys.executable, hidden) if enabled else None
+                if command != previous:
+                    windows_startup.write_command(command)
+                    rollback.callback(windows_startup.write_command, previous)
+            preferences = DisplayPreferences(hotkey, location, effect, speed, self.page if remember_page else None)
             preferences.save(self.display_settings_path)
-        except OSError:
-            self.tray.set_hotkey(old_hotkey, validate_chord=False)
-            raise
+            rollback.pop_all()
         self.preferences = preferences
         self.shortcut_hint.configure(text=preferences.hotkey)
 
@@ -465,11 +510,13 @@ class PanelWindow:
     def power_changed(self, on, snapshot):
         self.powered = on
         self.sent_content = None
+        self.snapshot = snapshot
         self.refreshed(snapshot)
         self.connection_message("Panel je zapnutý." if on else "Panel je vypnutý.")
 
     def refreshed(self, snapshot):
-        self.snapshot = snapshot
+        if snapshot is not None:
+            self.snapshot = snapshot
         self.next_refresh = monotonic() + REFRESH_INTERVAL
 
     def content_sent(self, content, snapshot):
@@ -502,33 +549,29 @@ class PanelWindow:
         if self.pending is None:
             changed = content != self.sent_content or (self.page is Page.PC and now >= self.next_refresh)
             if self.connected and self.powered and changed:
-                self.submit(self.connection.refresh(*content), lambda snapshot: self.content_sent(content, snapshot))
+                update = self.connection.refresh(*content, effect=self.preferences.transition, speed=self.preferences.speed)
+                self.submit(update, lambda snapshot: self.content_sent(content, snapshot))
             elif self.connected and now >= self.next_refresh:
                 self.submit(self.connection.verify_connection(), self.refreshed)
             elif not self.connected and self.target_panel is not None and now >= self.retry_at:
                 self.connect()
         if self.root.state() != "withdrawn":
             self.update_preview(now, content)
-        self.root.after(80, self.tick)
+        self.root.after(20 if self.preview_animation else 80, self.tick)
 
     def update_preview(self, now, content):
         page, location, data, notice = content
         colon = int(now * 1000 / COLON_PHASE_MS) % 2 == 0
         offset = int(now * 22) if page is Page.NEWS and data is not None else 0
         key = (content, self.snapshot, colon if page is Page.PC and self.snapshot else None, offset, self.powered)
-        if key == self.preview_key:
+        if key == self.preview_key and self.preview_animation is None:
             return
         self.preview_key = key
-        frame = None
         if page is Page.PC:
             detail = f"Obnova každých {REFRESH_INTERVAL} s"
-            if self.snapshot:
-                frame = render_status(*self.snapshot, show_colon=colon)
         elif page is Page.WEATHER:
-            frame = render_weather(location, data, notice)
             detail = f"{location.label} · Open-Meteo" if location else "Vyber lokalitu v Nastavení."
         else:
-            frame = render_news(data, notice, offset)
             detail = f"Novinky.cz · {data.title}" if data else "Zdroj: Novinky.cz, RSS Zpravodajství"
         if data is not None and notice:
             detail += f" · {notice}"
@@ -537,23 +580,47 @@ class PanelWindow:
             detail += f" · {error[:160]}"
         if self.preview_detail.cget("text") != detail:
             self.preview_detail.configure(text=detail)
-        if frame is not None and self.powered is not False:
-            self.photo = ImageTk.PhotoImage(frame.resize(PREVIEW_SIZE, Image.Resampling.NEAREST))
-            self.preview.itemconfigure(self.preview_image, image=self.photo)
-            self.preview.itemconfigure(self.preview_text, text="")
+        frame = render_page_frame(content, self.snapshot, show_colon=colon, news_offset=offset)
+        frame = self.transition_preview(page, frame, now)
+        if frame is not None:
+            if frame is not self.preview_frame:
+                self.photo = ImageTk.PhotoImage(frame.resize(PREVIEW_SIZE, Image.Resampling.NEAREST))
+                self.preview.itemconfigure(self.preview_image, image=self.photo)
+                self.preview.itemconfigure(self.preview_text, text="")
         else:
             self.preview.itemconfigure(self.preview_image, image="")
             self.photo = None
             text = "Displej je vypnutý" if self.powered is False else "Živý náhled se zobrazí po zapnutí"
             self.preview.itemconfigure(self.preview_text, text=text)
+        self.preview_frame = frame
+
+    def transition_preview(self, page, frame, now):
+        previous_page = self.preview_page
+        self.preview_page = page
+        if self.powered is False:
+            self.preview_animation = None
+            return None
+        if previous_page is not page:
+            self.preview_animation = None
+            effect = self.preferences.transition
+            if previous_page is not None and effect is not Transition.NONE and (self.preview_frame or frame):
+                blank = Image.new("RGB", PANEL_SIZE)
+                animation = make_transition(self.preview_frame or blank, frame or blank, effect, self.preferences.speed)
+                self.preview_animation = now, animation
+        if self.preview_animation is not None:
+            started_at, animation = self.preview_animation
+            index = int((now - started_at) * 1000 / animation.frame_ms)
+            if index < len(animation.frames):
+                return animation.frames[index]
+            self.preview_animation = None
+        return frame
 
     def show_window(self):
-        self.root.deiconify()
-        self.root.lift()
-        self.root.focus_force()
+        show_foreground_window(self.root)
 
     def hide_window(self):
         if self.tray.available:
+            self.preview_animation = self.preview_page = self.preview_key = None
             self.root.withdraw()
         else:
             self.close()
@@ -583,7 +650,18 @@ class PanelWindow:
         finish()
 
 
-if __name__ == "__main__" and not TrayIcon.open_existing():
+def main():
+    hidden = windows_startup.TRAY_ARGUMENT in sys.argv[1:]
+    if TrayIcon.open_existing(show=not hidden):
+        return
     window = tk.Tk()
-    PanelWindow(window)
+    if hidden:
+        window.withdraw()
+    app = PanelWindow(window)
+    if hidden and not app.tray.available:
+        window.deiconify()
     window.mainloop()
+
+
+if __name__ == "__main__":
+    main()

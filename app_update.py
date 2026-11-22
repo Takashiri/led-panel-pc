@@ -14,7 +14,7 @@ from tempfile import NamedTemporaryFile
 from windows_http import get
 
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.3"
 REPOSITORY = "Takashiri/led-panel-pc"
 LATEST_RELEASE = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 ASSET_NAME = "LED-Panel.exe"
