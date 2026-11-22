@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from display_pages import Location
 from pc_status import ADDRESS_PATTERN
 
 
@@ -12,6 +13,27 @@ def settings_file():
     local = os.environ.get("LOCALAPPDATA")
     directory = Path(local) if local else Path.home() / "AppData" / "Local"
     return directory / "LED Panel PC" / "settings.json"
+
+
+def read_settings(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_settings(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temporary:
+        pending = Path(temporary.name)
+        try:
+            json.dump(data, temporary, ensure_ascii=False)
+            temporary.close()
+            pending.replace(path)
+        finally:
+            temporary.close()
+            pending.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -22,12 +44,7 @@ class SavedPanel:
 
     @classmethod
     def load(cls, path):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(data, dict):
-            return None
+        data = read_settings(path)
         name, address, powered = (data.get(key) for key in ("name", "address", "powered"))
         if not isinstance(name, str) or not name.strip():
             return None
@@ -38,13 +55,22 @@ class SavedPanel:
         return cls(name, address.upper(), powered)
 
     def save(self, path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temporary:
-            pending = Path(temporary.name)
-            try:
-                json.dump(asdict(self), temporary, ensure_ascii=False)
-                temporary.close()
-                pending.replace(path)
-            finally:
-                temporary.close()
-                pending.unlink(missing_ok=True)
+        write_settings(path, asdict(self))
+
+
+DEFAULT_HOTKEY = "Ctrl+Alt+F9"
+
+
+@dataclass(frozen=True)
+class DisplayPreferences:
+    hotkey: str = DEFAULT_HOTKEY
+    location: Location | None = None
+
+    @classmethod
+    def load(cls, path):
+        data = read_settings(path)
+        hotkey = data.get("hotkey", DEFAULT_HOTKEY)
+        return cls(hotkey if isinstance(hotkey, str) else DEFAULT_HOTKEY, Location.from_mapping(data.get("location")))
+
+    def save(self, path):
+        write_settings(path, asdict(self))

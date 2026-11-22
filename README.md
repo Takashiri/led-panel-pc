@@ -10,6 +10,16 @@ Program pro Windows posílá místní čas, vytížení CPU a obsazení RAM pře
 
 Zavřením okna přes **×** se aplikace skryje k hodinám. Kliknutím na její ikonu otevřeš okno. Pravým kliknutím otevřeš nabídku **Zapnout panel**, **Vypnout panel** a **Ukončit**. Windows může ikonu umístit pod šipku **^**. Tlačítko **Odpojit** uvolní Bluetooth spojení a zastaví pokusy o připojení pro aktuální spuštění aplikace.
 
+## Obrazovky displeje
+
+- **Stav PC** zobrazuje hodiny, vytížení CPU a obsazení RAM.
+- **Počasí** zobrazuje teplotu ve °C a relativní vlhkost. V okně **Nastavení** vyhledej město, vyber odpovídající výsledek a klikni na **Uložit**. Aktuální modelová data dodává [Open-Meteo](https://open-meteo.com/en/docs). Bezplatné API je určené pro [nekomerční použití](https://open-meteo.com/en/terms).
+- **Novinky.cz** posouvá první titulek z oficiálního RSS kanálu **Zpravodajství**. Aplikace ho načítá přímo na PC pro osobní zobrazení. [Tiráž a RSS kanály Novinky.cz](https://www.novinky.cz/p/tiraz)
+
+Obrazovky se přepínají výběrem v okně, volbou **Další obrazovka** u hodin nebo výchozí zkratkou **Ctrl+Alt+F9**. Zkratku lze změnit v **Nastavení** a funguje i se skrytým oknem.
+
+Na LED panelu a v jeho náhledu se text kreslí ostrými pixely bez diakritiky. V okně aplikace se zobrazují původní názvy a titulky.
+
 Soubor `.exe` lze použít samostatně na 64bitových Windows 10 nebo 11 s Bluetooth LE. Pro jeden panel používej jedno ovládání.
 
 Pokud Windows při spuštění hlásí chybějící `VCRUNTIME140.dll` nebo `VCRUNTIME140_1.dll`, nainstaluj [Microsoft Visual C++ Redistributable pro x64](https://aka.ms/vc14/vc_redist.x64.exe).

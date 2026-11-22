@@ -10,7 +10,19 @@ import psutil
 from PIL import Image, ImageTk
 from pypixelcolor import AsyncClient
 
-from panel_preferences import SavedPanel, settings_file
+from display_pages import (
+    NEWS_COLOR,
+    NEWS_SPEED,
+    Page,
+    png_hex,
+    read_headline,
+    read_weather,
+    render_news,
+    render_weather,
+    ticker_font,
+)
+from display_settings import DisplaySettingsWindow
+from panel_preferences import DisplayPreferences, SavedPanel, settings_file
 from pc_status import (
     COLON_PHASE_MS,
     PANEL_BRIGHTNESS,
@@ -32,6 +44,9 @@ BUTTON = "#30425a"
 PREVIEW_SIZE = (512, 128)
 ICON_PATH = Path(__file__).with_name("led-panel.ico")
 RECONNECT_DELAY = 10
+FETCH_INTERVALS = {Page.WEATHER: 900, Page.NEWS: 300}
+FETCH_RETRY = 60
+MAX_CONTENT_AGE = 3600
 
 
 class PanelConnection:
@@ -59,13 +74,19 @@ class PanelConnection:
         if on:
             psutil.cpu_percent()
             await asyncio.sleep(0.5)
-            return await self.refresh()
-        return None
 
-    async def refresh(self):
-        status = read_status()
-        await self.panel.send_image_hex(encode_status_animation(*status), ".gif", save_slot=0)
-        return status
+    async def refresh(self, page, location, data, notice):
+        if page is Page.PC:
+            status = read_status()
+            await self.panel.send_image_hex(encode_status_animation(*status), ".gif", save_slot=0)
+            return status
+        if page is Page.NEWS and data is not None:
+            await self.panel.send_text(data.ticker, animation="scroll_left", speed=NEWS_SPEED,
+                                       color=NEWS_COLOR, font=ticker_font(), save_slot=0)
+        else:
+            frame = render_weather(location, data, notice) if page is Page.WEATHER else render_news(None, notice)
+            await self.panel.send_image_hex(png_hex(frame), ".png", save_slot=0)
+        return None
 
     async def verify_connection(self):
         self.panel.get_device_info()
@@ -75,6 +96,15 @@ class PanelWindow:
     def __init__(self, root):
         self.root = root
         self.settings_path = settings_file()
+        self.display_settings_path = self.settings_path.with_name("display.json")
+        self.preferences = DisplayPreferences.load(self.display_settings_path)
+        self.settings_dialog = None
+        self.page = Page.PC
+        self.sent_content = None
+        self.content_cache = {}
+        self.content_errors = {}
+        self.content_jobs = {}
+        self.next_fetch = {}
         self.saved_panel = SavedPanel.load(self.settings_path)
         self.target_panel = self.saved_panel
         self.settings_error = False
@@ -92,14 +122,17 @@ class PanelWindow:
         self.retry_at = 0.0
         self.closing = False
 
-        root.title("LED panel pro PC 1.1")
+        root.title("LED panel pro PC 1.2")
         root.iconbitmap(default=str(ICON_PATH))
         root.configure(bg=BACKGROUND)
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", self.hide_window)
         main = tk.Frame(root, bg=BACKGROUND, padx=24, pady=20)
         main.pack(fill="both", expand=True)
-        self.label(main, "LED panel pro PC", size=22, bold=True, bg=BACKGROUND).pack(anchor="w")
+        header = tk.Frame(main, bg=BACKGROUND)
+        header.pack(fill="x")
+        self.label(header, "LED panel pro PC", size=22, bold=True, bg=BACKGROUND).pack(side="left")
+        self.button(header, "Nastavení", self.open_settings).pack(side="right")
         self.label(main, "Ovládání přes Bluetooth", color=MUTED, bg=BACKGROUND).pack(anchor="w", pady=(0, 16))
 
         connection_card = tk.Frame(main, bg=SURFACE, padx=16, pady=13)
@@ -122,13 +155,21 @@ class PanelWindow:
         heading = tk.Frame(preview_card, bg=SURFACE)
         heading.pack(fill="x", pady=(0, 9))
         self.label(heading, "Náhled panelu", bold=True).pack(side="left")
-        self.label(heading, f"Obnova každých {REFRESH_INTERVAL} s", color=MUTED, size=9).pack(side="right")
+        self.page_choice = ttk.Combobox(heading, state="readonly", values=[page.value for page in Page], width=12)
+        self.page_choice.set(self.page.value)
+        self.page_choice.bind("<<ComboboxSelected>>", lambda _: self.select_page(Page(self.page_choice.get())))
+        self.page_choice.pack(side="right")
+        self.shortcut_hint = self.label(heading, "", color=MUTED, size=9)
+        self.shortcut_hint.pack(side="right", padx=(0, 10))
         self.preview = tk.Canvas(preview_card, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1], bg="#080d16", highlightthickness=0)
         self.preview.pack()
         self.preview_image = self.preview.create_image(0, 0, anchor="nw")
         self.preview_text = self.preview.create_text(
             PREVIEW_SIZE[0] // 2, PREVIEW_SIZE[1] // 2, fill=MUTED, font=("Segoe UI", 11)
         )
+        self.preview_detail = self.label(preview_card, "", color=MUTED, size=9)
+        self.preview_detail.configure(wraplength=512, justify="left")
+        self.preview_detail.pack(fill="x", pady=(6, 0))
 
         power_row = tk.Frame(main, bg=BACKGROUND)
         power_row.pack(fill="x", pady=(16, 0))
@@ -138,7 +179,13 @@ class PanelWindow:
         self.off_button.pack(side="right")
         self.on_button.pack(side="right", padx=(0, 8))
 
-        self.tray = TrayIcon(root, ICON_PATH, self.show_window, self.tray_actions)
+        self.tray = TrayIcon(root, ICON_PATH, self.show_window, self.tray_actions, self.cycle_page)
+        try:
+            shortcut = self.tray.set_hotkey(self.preferences.hotkey)
+        except ValueError:
+            self.shortcut_hint.configure(text="Zkratka není aktivní")
+        else:
+            self.shortcut_hint.configure(text=shortcut)
         if self.saved_panel:
             self.set_devices([(self.saved_panel.name, self.saved_panel.address, 0)])
         else:
@@ -183,6 +230,7 @@ class PanelWindow:
             ("Otevřít aplikaci", self.show_window),
             ("Zapnout panel", (lambda: self.set_power(True)) if self.can_set_power(True) else None),
             ("Vypnout panel", (lambda: self.set_power(False)) if self.can_set_power(False) else None),
+            ("Další obrazovka", self.cycle_page),
             (None, None),
             ("Ukončit", self.close),
         )
@@ -190,6 +238,75 @@ class PanelWindow:
     def submit(self, coroutine, callback):
         self.pending = asyncio.run_coroutine_threadsafe(coroutine, self.loop), callback
         self.update_controls()
+
+    def online(self, function, *args):
+        return asyncio.run_coroutine_threadsafe(asyncio.to_thread(function, *args), self.loop)
+
+    def select_page(self, page):
+        self.page = page
+        self.page_choice.set(page.value)
+
+    def cycle_page(self):
+        pages = tuple(Page)
+        self.select_page(pages[(pages.index(self.page) + 1) % len(pages)])
+
+    def open_settings(self):
+        if self.settings_dialog and self.settings_dialog.window.winfo_exists():
+            self.settings_dialog.window.lift()
+        else:
+            self.settings_dialog = DisplaySettingsWindow(self.root, self.preferences, self.online, self.save_display)
+
+    def save_display(self, hotkey, location):
+        old_hotkey = self.tray.hotkey
+        preferences = DisplayPreferences(self.tray.set_hotkey(hotkey), location)
+        try:
+            preferences.save(self.display_settings_path)
+        except OSError:
+            self.tray.set_hotkey(old_hotkey)
+            raise
+        self.preferences = preferences
+        self.shortcut_hint.configure(text=preferences.hotkey)
+
+    def update_online(self, now):
+        for page, (key, job) in tuple(self.content_jobs.items()):
+            if not job.done():
+                continue
+            del self.content_jobs[page]
+            try:
+                self.content_cache[key] = (job.result(), now)
+            except Exception as error:
+                self.next_fetch[key] = now + FETCH_RETRY
+                self.content_errors[key] = str(error).strip() or type(error).__name__
+            else:
+                self.next_fetch[key] = now + FETCH_INTERVALS[page]
+                self.content_errors.pop(key, None)
+
+        if self.page is Page.PC or self.page in self.content_jobs:
+            return
+        location = self.preferences.location if self.page is Page.WEATHER else None
+        key = (self.page, location)
+        if now < self.next_fetch.get(key, 0) or (self.page is Page.WEATHER and location is None):
+            return
+        job = self.online(read_weather, location) if location is not None else self.online(read_headline)
+        self.content_jobs[self.page] = (key, job)
+
+    def selected_content(self, now):
+        if self.page is Page.PC:
+            return self.page, None, None, ""
+        location = self.preferences.location if self.page is Page.WEATHER else None
+        key = (self.page, location)
+        data, fetched_at = self.content_cache.get(key, (None, 0))
+        if now - fetched_at > MAX_CONTENT_AGE:
+            data = None
+        if data is not None:
+            notice = "Poslední načtené údaje" if key in self.content_errors else ""
+        elif self.page is Page.WEATHER and location is None:
+            notice = "Nastav lokalitu"
+        elif key in self.content_errors:
+            notice = "Nedostupné"
+        else:
+            notice = "Načítám…"
+        return self.page, location, data, notice
 
     def scan(self):
         if self.closing or self.pending is not None or self.connected:
@@ -265,6 +382,7 @@ class PanelWindow:
     def disconnected(self, _):
         self.connected = False
         self.powered = self.snapshot = None
+        self.sent_content = None
         self.message.configure(text="Panel je odpojený.", fg=MUTED)
 
     def set_power(self, on):
@@ -277,12 +395,17 @@ class PanelWindow:
 
     def power_changed(self, on, snapshot):
         self.powered = on
+        self.sent_content = None
         self.refreshed(snapshot)
-        self.connection_message("Panel je zapnutý. Zobrazuje stav PC." if on else "Panel je vypnutý.")
+        self.connection_message("Panel je zapnutý." if on else "Panel je vypnutý.")
 
     def refreshed(self, snapshot):
         self.snapshot = snapshot
         self.next_refresh = monotonic() + REFRESH_INTERVAL
+
+    def content_sent(self, content, snapshot):
+        self.sent_content = content
+        self.refreshed(snapshot)
 
     def tick(self):
         if self.closing:
@@ -301,24 +424,47 @@ class PanelWindow:
             self.update_controls()
 
         now = monotonic()
+        self.update_online(now)
+        content = self.selected_content(now)
         if self.pending is None:
-            if self.connected and now >= self.next_refresh:
-                poll = self.connection.refresh if self.powered else self.connection.verify_connection
-                self.submit(poll(), self.refreshed)
+            changed = content != self.sent_content or (self.page is Page.PC and now >= self.next_refresh)
+            if self.connected and self.powered and changed:
+                self.submit(self.connection.refresh(*content), lambda snapshot: self.content_sent(content, snapshot))
+            elif self.connected and now >= self.next_refresh:
+                self.submit(self.connection.verify_connection(), self.refreshed)
             elif not self.connected and self.target_panel is not None and now >= self.retry_at:
                 self.connect()
         if self.root.state() != "withdrawn":
-            self.update_preview(now)
+            self.update_preview(now, content)
         self.root.after(80, self.tick)
 
-    def update_preview(self, now):
+    def update_preview(self, now, content):
+        page, location, data, notice = content
         colon = int(now * 1000 / COLON_PHASE_MS) % 2 == 0
-        key = (self.snapshot, colon if self.snapshot else None, self.powered)
+        offset = int(now * 22) if page is Page.NEWS and data is not None else 0
+        key = (content, self.snapshot, colon if page is Page.PC and self.snapshot else None, offset, self.powered)
         if key == self.preview_key:
             return
         self.preview_key = key
-        if self.snapshot:
-            frame = render_status(*self.snapshot, show_colon=colon)
+        frame = None
+        if page is Page.PC:
+            detail = f"Obnova každých {REFRESH_INTERVAL} s"
+            if self.snapshot:
+                frame = render_status(*self.snapshot, show_colon=colon)
+        elif page is Page.WEATHER:
+            frame = render_weather(location, data, notice)
+            detail = f"{location.label} · Open-Meteo" if location else "Vyber lokalitu v Nastavení."
+        else:
+            frame = render_news(data, notice, offset)
+            detail = f"Novinky.cz · {data.title}" if data else "Zdroj: Novinky.cz, RSS Zpravodajství"
+        if data is not None and notice:
+            detail += f" · {notice}"
+        error = self.content_errors.get((page, location))
+        if error and data is None:
+            detail += f" · {error[:160]}"
+        if self.preview_detail.cget("text") != detail:
+            self.preview_detail.configure(text=detail)
+        if frame is not None and self.powered is not False:
             self.photo = ImageTk.PhotoImage(frame.resize(PREVIEW_SIZE, Image.Resampling.NEAREST))
             self.preview.itemconfigure(self.preview_image, image=self.photo)
             self.preview.itemconfigure(self.preview_text, text="")
@@ -348,6 +494,8 @@ class PanelWindow:
         if self.pending is not None:
             self.pending[0].cancel()
             self.pending = None
+        for _, job in self.content_jobs.values():
+            job.cancel()
         closed = asyncio.run_coroutine_threadsafe(self.connection.disconnect(), self.loop)
 
         def finish():
